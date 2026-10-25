@@ -1,0 +1,60 @@
+name: checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '${{ matrix.python }}'
+      - run: pip install -e '.[dev]'
+      - run: ruff check .
+      - run: pytest -q
+      - run: python -m build
+  sql-contracts:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        database: [postgres, mysql]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: insights
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: insights_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U insights -d insights_test"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: test-only
+          MYSQL_DATABASE: insights_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -ptest-only"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[dev,postgres,mysql]'
+      - name: PostgreSQL contract
+        if: matrix.database == 'postgres'
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://insights:test-only@127.0.0.1:5432/insights_test
+        run: pytest -q
+      - name: MySQL contract
+        if: matrix.database == 'mysql'
+        env:
+          TEST_DATABASE_URL: mysql+pymysql://root:test-only@127.0.0.1:3306/insights_test
+        run: pytest -q

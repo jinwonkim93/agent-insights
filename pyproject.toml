@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-insights"
+version = "0.1.0a1"
+description = "Provider-independent topic analytics for closed conversations"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1", "httpx>=0.27,<1", "sqlalchemy>=2.0,<3", "numpy>=1.26,<3", "pydantic-settings>=2.5,<3"]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.2,<4"]
+mysql = ["pymysql>=1.1,<2"]
+umap = ["umap-learn>=0.5.7,<0.6", "hdbscan>=0.8.40,<0.9"]
+dev = ["pytest>=8,<10", "ruff>=0.9,<1", "build>=1.2,<2"]
+
+[project.scripts]
+agent-insights = "agent_insights.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_insights"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

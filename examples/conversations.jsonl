@@ -1,0 +1,3 @@
+{"tenant_id":"demo","bot_id":"support","external_id":"example-1","closed_at":"2026-10-25T12:00:00+09:00","messages":[{"role":"customer","text":"Please change my mailing address."},{"role":"assistant","text":"I can help update your address."}]}
+{"tenant_id":"demo","bot_id":"support","external_id":"example-2","closed_at":"2026-10-25T12:15:00+09:00","messages":[{"role":"customer","text":"I moved recently and need to update my address."},{"role":"assistant","text":"Let us update the mailing address."}]}
+{"tenant_id":"demo","bot_id":"support","external_id":"example-3","closed_at":"2026-10-25T12:30:00+09:00","messages":[{"role":"customer","text":"How do I change the address on my account?"},{"role":"assistant","text":"I can help with the address change."}]}
