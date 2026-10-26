@@ -2,6 +2,10 @@
 
 **Provider-independent topic analytics for continuously arriving, closed conversations.**
 
+![Agent Insights demo dashboard showing topic rankings, linked conversations, and transcript evidence](docs/assets/demo-dashboard.jpg)
+
+*Offline demo with original synthetic conversations. No customer data is shown.*
+
 ```text
 Closed conversation → request summaries → existing topic assignment
                                             ↓ uncertain requests
