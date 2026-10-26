@@ -1,7 +1,10 @@
 import argparse
 import json
+import logging
+import signal
 import time
 from datetime import UTC, datetime, timedelta
+from threading import Event
 
 from .clustering import CompleteLink, UMAPDiscovery
 from .config import Settings
@@ -25,7 +28,9 @@ def main():
     worker.add_argument("--poll-seconds", type=float, default=2)
     worker.add_argument("--discover-seconds", type=float, default=60)
     sub.add_parser("demo", help="Seed and process ORIGINAL synthetic data; requires demo providers")
+    sub.add_parser("migrate", help="Upgrade the database schema; run once before deployment")
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = Settings()
     if args.command == "serve":
         import uvicorn
@@ -40,7 +45,18 @@ def main():
         uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
         return
     repo = SQLRepository(settings.database_url)
-    repo.initialize()
+    if args.command == "migrate":
+        from .migrate import upgrade
+
+        try:
+            upgrade(repo.engine)
+            print("Schema upgraded")
+        finally:
+            repo.close()
+        return
+    if settings.auto_create_schema or args.command == "init-db":
+        repo.initialize()
+    repo.check_ready()
     generator = embedder = None
     try:
         if args.command == "init-db":
@@ -90,13 +106,17 @@ def main():
         )
         service = InsightService(repo, generator, embedder, clusterer, settings)
         last_discovery = 0
-        while True:
+        stopping = Event()
+        signal.signal(signal.SIGTERM, lambda *_: stopping.set())
+        while not stopping.is_set():
             worked = service.process_one()
             # Drain queued conversations before discovery in one-shot/demo mode.
             once = args.command == "demo" or args.once
             if once and worked:
                 continue
-            if once or time.monotonic() - last_discovery >= args.discover_seconds:
+            if not stopping.is_set() and (
+                once or time.monotonic() - last_discovery >= args.discover_seconds
+            ):
                 for tenant, bot in repo.bots():
                     try:
                         result = service.discover(tenant, bot)
@@ -107,7 +127,7 @@ def main():
             if once:
                 break
             if not worked:
-                time.sleep(max(0.1, args.poll_seconds))
+                stopping.wait(max(0.1, args.poll_seconds))
     finally:
         for provider in (generator, embedder):
             if provider is not None and hasattr(provider, "close"):

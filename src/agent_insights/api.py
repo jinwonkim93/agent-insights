@@ -1,3 +1,6 @@
+import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -5,11 +8,13 @@ from secrets import compare_digest
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
 from .domain import ClosedConversation
+from .middleware import BodyLimitMiddleware
 from .storage import SQLRepository
 from .storage.sql import Conflict
 
@@ -40,13 +45,28 @@ def create_app(settings=None, repository=None):
 
     @asynccontextmanager
     async def lifespan(app):
-        repository.initialize()
+        if settings.auto_create_schema:
+            repository.initialize()
+        repository.check_ready()
         yield
         if owned:
             repository.close()
 
     app = FastAPI(title="Agent Insights", version="0.1.0a1", lifespan=lifespan)
     app.state.repository = repository
+    app.add_middleware(BodyLimitMiddleware)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request, exc):
+        # FastAPI's default response echoes input, which may contain conversation data.
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": [
+                    {"loc": list(error["loc"]), "type": error["type"]} for error in exc.errors()
+                ]
+            },
+        )
 
     def authorize(authorization: str = Header(default="")):
         expected = settings.api_key.get_secret_value()
@@ -64,7 +84,17 @@ def create_app(settings=None, repository=None):
             return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
         if size > 2_000_000:
             return JSONResponse({"detail": "Request too large"}, status_code=413)
+        request_id = str(uuid.uuid4())
+        started = time.monotonic()
         response = await call_next(request)
+        logging.getLogger(__name__).info(
+            "http_request request_id=%s method=%s status=%s duration_ms=%.1f",
+            request_id,
+            request.method,
+            response.status_code,
+            (time.monotonic() - started) * 1000,
+        )
+        response.headers["X-Request-ID"] = request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -72,6 +102,14 @@ def create_app(settings=None, repository=None):
     @app.get("/health")
     def health():
         return {"status": "ok", "version": "0.1.0a1"}
+
+    @app.get("/ready")
+    def ready():
+        try:
+            repository.check_ready()
+        except Exception:
+            return JSONResponse({"status": "unavailable"}, status_code=503)
+        return {"status": "ready"}
 
     @app.post("/v1/conversations", status_code=202, dependencies=[Depends(authorize)])
     def ingest(conversation: ClosedConversation):

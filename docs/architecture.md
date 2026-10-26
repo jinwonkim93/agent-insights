@@ -24,7 +24,9 @@ No per-facet vector is persisted. Topic vectors are portable JSON arrays; larger
 
 Identical input registration is a no-op; changed content under the same ID is rejected. Analysis transitions queued → processing → done. Failures retry up to the maximum and then become failed. Expired claims can be reclaimed, but old workers cannot commit after lease expiry or token replacement. Extraction and assignment are published in one transaction.
 
-Discovery reads bounded pending requests under a per-bot lease. It serializes final publication and checks the topic cap inside the transaction. Concurrent session analysis may use an older registry and leave a request pending for the next pass. Existing assigned requests and topic IDs are not rewritten.
+Discovery reads bounded pending requests under a per-bot lease renewed by a background heartbeat. It serializes final publication and checks the topic cap inside the transaction. Concurrent session analysis may use an older registry and leave a request pending for the next pass. Existing assigned requests and topic IDs are not rewritten.
+
+Same-batch proposals are included in subsequent semantic reviews, with temporary IDs resolved before publication. Combined candidates recompute their prototype from all members. This is conservative model-assisted deduplication, not a guarantee of semantic uniqueness.
 
 Daily clusters are temporary. The registry starts empty and grows only through registration decisions. At its cap, registration stops, but existing-topic reuse continues; pending expires independently. A fixed cap trades off fine-grained coverage. It is not a semantic guarantee against future diversity.
 
@@ -34,4 +36,4 @@ There is no upper hierarchy now. If needed, add separate categories and versione
 
 ## Alpha limitations
 
-No raw-data deletion/edit propagation, model migration, immutable exports, schema migrations, tenant quotas, heartbeat, cancellation or vector-index adapter. Complete-link is bounded small-batch reference code. SQL concurrency behavior must be validated per database. Semantic quality requires labeled evaluation beyond unit tests.
+No raw-data deletion/edit propagation, model migration, immutable exports, tenant quotas, model-call cancellation or vector-index adapter. Schema upgrades use Alembic; ownership heartbeats retain fencing. Complete-link is bounded small-batch reference code. SQL concurrency behavior must be validated per database. Semantic quality requires labeled evaluation beyond unit tests.

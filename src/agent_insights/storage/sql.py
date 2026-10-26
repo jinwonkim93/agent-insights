@@ -24,6 +24,7 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
 
@@ -43,7 +44,7 @@ sessions = Table(
     Column("messages", JSON, nullable=False),
     Column("status", String(24), nullable=False),
     Column("attempts", Integer, nullable=False, default=0),
-    Column("lease_until", Float, nullable=False, default=0),
+    Column("lease_until", Float(53), nullable=False, default=0),
     Column("claim_token", String(36)),
     Column("error", String(120)),
 )
@@ -82,7 +83,7 @@ locks = Table(
     metadata,
     Column("id", String(64), primary_key=True),
     Column("token", String(36)),
-    Column("lease_until", Float, nullable=False, default=0),
+    Column("lease_until", Float(53), nullable=False, default=0),
 )
 
 
@@ -110,13 +111,15 @@ class LostLease(RuntimeError):
 
 class SQLRepository:
     def __init__(self, url):
+        url = make_url(url)
+        sqlite = url.get_backend_name() == "sqlite"
         options = {"pool_pre_ping": True}
-        if url.startswith("sqlite"):
+        if sqlite:
             options["connect_args"] = {"check_same_thread": False}
-            if ":memory:" in url:
+            if url.database in {None, "", ":memory:"}:
                 options["poolclass"] = StaticPool
         self.engine = create_engine(url, **options)
-        if url.startswith("sqlite"):
+        if sqlite:
 
             @event.listens_for(self.engine, "connect")
             def foreign_keys(conn, record):
@@ -124,6 +127,14 @@ class SQLRepository:
 
     def initialize(self):
         metadata.create_all(self.engine)
+
+    def check_ready(self):
+        with self.engine.connect() as conn:
+            # Check schema as well as connectivity.
+            conn.execute(select(sessions.c.id).limit(1))
+            conn.execute(select(topics.c.id).limit(1))
+            conn.execute(select(facets.c.id).limit(1))
+            conn.execute(select(locks.c.id).limit(1))
 
     def enqueue(self, conversation):
         values = dict(
@@ -201,6 +212,35 @@ class SQLRepository:
                 conn.execute(select(sessions).where(sessions.c.id == row.id)).mappings().one()
             )
 
+    def renew_conversation(self, job, seconds):
+        now = time.time()
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(sessions)
+                .where(
+                    sessions.c.id == job["id"],
+                    sessions.c.claim_token == job["claim_token"],
+                    sessions.c.status == "processing",
+                    sessions.c.lease_until > now,
+                )
+                .values(lease_until=now + seconds)
+            )
+            return result.rowcount == 1
+
+    def renew_discovery(self, tenant, bot, token, seconds):
+        now = time.time()
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(locks)
+                .where(
+                    locks.c.id == identity(tenant, bot),
+                    locks.c.token == token,
+                    locks.c.lease_until > now,
+                )
+                .values(lease_until=now + seconds)
+            )
+            return result.rowcount == 1
+
     def topics(self, tenant, bot):
         with self.engine.connect() as conn:
             return [
@@ -255,6 +295,7 @@ class SQLRepository:
                     sessions.c.id == job["id"],
                     sessions.c.claim_token == job["claim_token"],
                     sessions.c.status == "processing",
+                    sessions.c.lease_until > time.time(),
                 )
                 .values(
                     status="failed" if job["attempts"] >= max_attempts else "queued",

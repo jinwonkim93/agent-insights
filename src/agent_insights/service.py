@@ -1,8 +1,13 @@
+import logging
+
 import numpy as np
 
 from .clustering import normalized
 from .domain import Extraction, TopicDecision, TopicDescription
+from .leases import LeaseHeartbeat
 from .ports import Clusterer, Embedder, Generator, Repository
+
+logger = logging.getLogger(__name__)
 
 EXTRACT = """Extract independent customer requests from this CLOSED conversation.
 Return {"facets":[{"summary":"specific request, omit private details",
@@ -45,43 +50,52 @@ class InsightService:
         if job is None:
             return False
         try:
-            registry = self._registry(job["tenant_id"], job["bot_id"])
-            extraction = Extraction.model_validate(
-                self.generator.generate_json(
-                    EXTRACT, {"messages": job["messages"], "max_facets": s.max_facets_per_session}
+            with LeaseHeartbeat(
+                lambda: self.repo.renew_conversation(job, s.lease_seconds), s.lease_seconds
+            ):
+                registry = self._registry(job["tenant_id"], job["bot_id"])
+                extraction = Extraction.model_validate(
+                    self.generator.generate_json(
+                        EXTRACT,
+                        {"messages": job["messages"], "max_facets": s.max_facets_per_session},
+                    )
                 )
-            )
-            if len(extraction.facets) > s.max_facets_per_session:
-                raise ValueError("Model exceeded facet budget")
-            accepted, seen = [], set()
-            for facet in extraction.facets:
-                if any(
-                    i < 0 or i >= len(job["messages"]) or job["messages"][i]["role"] != "customer"
-                    for i in facet.evidence
-                ):
-                    raise ValueError("Model evidence did not refer to customer messages")
-                key = facet.summary.casefold().strip()
-                if key not in seen:
-                    accepted.append(facet.model_dump())
-                    seen.add(key)
-            if accepted:
-                vectors = normalized(self.embedder.embed([f["summary"] for f in accepted]))
-                if len(vectors) != len(accepted):
-                    raise ValueError("Embedding count mismatch")
-                if registry:
-                    centers = normalized([t["vector"] for t in registry])
-                    if vectors.shape[1] != centers.shape[1]:
-                        raise ValueError("Embedding dimensions changed")
-                    scores = vectors @ centers.T
-                    for facet, values in zip(accepted, scores):
-                        order = np.argsort(values)[::-1]
-                        best = float(values[order[0]])
-                        margin = best - float(values[order[1]]) if len(order) > 1 else best
-                        if best >= s.assignment_similarity and margin >= s.assignment_margin:
-                            facet["topic_id"] = registry[int(order[0])]["id"]
-            self.repo.finish(job, accepted)
+                if len(extraction.facets) > s.max_facets_per_session:
+                    raise ValueError("Model exceeded facet budget")
+                accepted, seen = [], set()
+                for facet in extraction.facets:
+                    if any(
+                        i < 0
+                        or i >= len(job["messages"])
+                        or job["messages"][i]["role"] != "customer"
+                        for i in facet.evidence
+                    ):
+                        raise ValueError("Model evidence did not refer to customer messages")
+                    key = facet.summary.casefold().strip()
+                    if key not in seen:
+                        accepted.append(facet.model_dump())
+                        seen.add(key)
+                if accepted:
+                    vectors = normalized(self.embedder.embed([f["summary"] for f in accepted]))
+                    if len(vectors) != len(accepted):
+                        raise ValueError("Embedding count mismatch")
+                    if registry:
+                        centers = normalized([t["vector"] for t in registry])
+                        if vectors.shape[1] != centers.shape[1]:
+                            raise ValueError("Embedding dimensions changed")
+                        scores = vectors @ centers.T
+                        for facet, values in zip(accepted, scores):
+                            order = np.argsort(values)[::-1]
+                            best = float(values[order[0]])
+                            margin = best - float(values[order[1]]) if len(order) > 1 else best
+                            if best >= s.assignment_similarity and margin >= s.assignment_margin:
+                                facet["topic_id"] = registry[int(order[0])]["id"]
+                self.repo.finish(job, accepted)
         except Exception as exc:
             # Error class only: no prompts, raw model output or credentials in logs/storage.
+            logger.warning(
+                "conversation_failed job_id=%s error_type=%s", job["id"], type(exc).__name__
+            )
             self.repo.fail(job, type(exc).__name__, s.max_attempts)
         return True
 
@@ -91,91 +105,113 @@ class InsightService:
         if token is None:
             return {"status": "busy"}
         try:
-            registry = self._registry(tenant, bot)
-            pending = self.repo.pending(
-                tenant, bot, s.pending_batch_size, s.pending_max_days, s.pending_max_reviews
-            )
-            if not pending:
-                return {"status": "idle", "reviewed": 0}
-            vectors = normalized(self.embedder.embed([p["summary"] for p in pending]))
-            groups = self.clusterer.groups(vectors.tolist(), [p["id"] for p in pending])
-            covered = [i for group in groups for i in group]
-            if sorted(covered) != list(range(len(pending))):
-                raise ValueError(
-                    "Clusterer must partition every input exactly once, including noise"
+            with LeaseHeartbeat(
+                lambda: self.repo.renew_discovery(tenant, bot, token, s.lease_seconds),
+                s.lease_seconds,
+            ):
+                registry = self._registry(tenant, bot)
+                pending = self.repo.pending(
+                    tenant, bot, s.pending_batch_size, s.pending_max_days, s.pending_max_reviews
                 )
-            decisions = []
-            for group in groups:
-                members = [pending[i] for i in group]
-                decision = {"action": "pending", "facet_ids": [m["id"] for m in members]}
-                if len({m["conversation_id"] for m in members}) >= s.min_sessions_per_topic:
-                    payload = {
-                        "summaries": [m["summary"] for m in members],
-                        "topics": [
-                            {
-                                "id": t["id"],
-                                "name": t["name"],
-                                "description": t["description"][:400],
-                            }
-                            for t in registry
-                        ],
-                    }
-                    proposed = TopicDecision.model_validate(
-                        self.generator.generate_json(DECIDE, payload)
+                if not pending:
+                    return {"status": "idle", "reviewed": 0}
+                vectors = normalized(self.embedder.embed([p["summary"] for p in pending]))
+                groups = self.clusterer.groups(vectors.tolist(), [p["id"] for p in pending])
+                covered = [i for group in groups for i in group]
+                if sorted(covered) != list(range(len(pending))):
+                    raise ValueError(
+                        "Clusterer must partition every input exactly once, including noise"
                     )
-                    # Independent second novelty check before registering a new persistent topic.
-                    if proposed.action == "create" and registry:
-                        proposed = TopicDecision.model_validate(
-                            self.generator.generate_json(
-                                DECIDE
-                                + " Recheck novelty conservatively; a narrower instance is existing.",
-                                {**payload, "proposal": proposed.model_dump()},
-                            )
-                        )
-                    if proposed.action == "assign_existing":
-                        if proposed.topic_id not in {t["id"] for t in registry}:
-                            raise ValueError("Model selected an unknown/out-of-scope topic")
-                        decision.update(action="assign_existing", topic_id=proposed.topic_id)
-                    elif proposed.action == "create":
-                        description = TopicDescription(
-                            name=proposed.name, description=proposed.description
-                        )
-                        duplicate = next(
-                            (
-                                t
+                decisions = []
+                staged_topics = {}
+                vector_by_id = {p["id"]: v for p, v in zip(pending, vectors)}
+
+                def extend_staged(target, ids):
+                    target["facet_ids"].extend(ids)
+                    target["vector"] = normalized(
+                        [np.mean([vector_by_id[key] for key in target["facet_ids"]], axis=0)]
+                    )[0].tolist()
+
+                for group in groups:
+                    members = [pending[i] for i in group]
+                    decision = {"action": "pending", "facet_ids": [m["id"] for m in members]}
+                    if len({m["conversation_id"] for m in members}) >= s.min_sessions_per_topic:
+                        payload = {
+                            "summaries": [m["summary"] for m in members],
+                            "topics": [
+                                {
+                                    "id": t["id"],
+                                    "name": t["name"],
+                                    "description": t["description"][:400],
+                                }
                                 for t in registry
-                                if t["name"].casefold() == description.name.casefold()
-                            ),
-                            None,
+                                + [{"id": key, **value} for key, value in staged_topics.items()]
+                            ],
+                        }
+                        proposed = TopicDecision.model_validate(
+                            self.generator.generate_json(DECIDE, payload)
                         )
-                        staged = next(
-                            (
-                                d
-                                for d in decisions
-                                if d["action"] == "create"
-                                and d["name"].casefold() == description.name.casefold()
-                            ),
-                            None,
-                        )
-                        if staged is not None:
-                            # Same-batch duplicate labels share one registration and prototype.
-                            staged["facet_ids"].extend(decision["facet_ids"])
-                            continue
-                        if duplicate:
-                            decision.update(action="assign_existing", topic_id=duplicate["id"])
-                        elif (
-                            len(registry) + sum(d["action"] == "create" for d in decisions)
-                            < s.max_topics_per_bot
-                        ):
-                            center = normalized([vectors[group].mean(axis=0)])[0].tolist()
-                            decision.update(
-                                action="create",
-                                **description.model_dump(),
-                                vector=center,
-                                space_id=self.embedder.space_id,
+                        # Independent second novelty check before registering a new persistent topic.
+                        if proposed.action == "create" and payload["topics"]:
+                            proposed = TopicDecision.model_validate(
+                                self.generator.generate_json(
+                                    DECIDE
+                                    + " Recheck novelty conservatively; a narrower instance is existing.",
+                                    {**payload, "proposal": proposed.model_dump()},
+                                )
                             )
-                decisions.append(decision)
-            result = self.repo.apply_discovery(tenant, bot, token, decisions, s.max_topics_per_bot)
-            return {"status": "completed", **result}
+                        if proposed.action == "assign_existing":
+                            if proposed.topic_id in staged_topics:
+                                extend_staged(
+                                    staged_topics[proposed.topic_id], decision["facet_ids"]
+                                )
+                                continue
+                            if proposed.topic_id not in {t["id"] for t in registry}:
+                                raise ValueError("Model selected an unknown/out-of-scope topic")
+                            decision.update(action="assign_existing", topic_id=proposed.topic_id)
+                        elif proposed.action == "create":
+                            description = TopicDescription(
+                                name=proposed.name, description=proposed.description
+                            )
+                            duplicate = next(
+                                (
+                                    t
+                                    for t in registry
+                                    if t["name"].casefold() == description.name.casefold()
+                                ),
+                                None,
+                            )
+                            staged = next(
+                                (
+                                    d
+                                    for d in decisions
+                                    if d["action"] == "create"
+                                    and d["name"].casefold() == description.name.casefold()
+                                ),
+                                None,
+                            )
+                            if staged is not None:
+                                # Same-batch duplicate labels share one registration and prototype.
+                                extend_staged(staged, decision["facet_ids"])
+                                continue
+                            if duplicate:
+                                decision.update(action="assign_existing", topic_id=duplicate["id"])
+                            elif (
+                                len(registry) + sum(d["action"] == "create" for d in decisions)
+                                < s.max_topics_per_bot
+                            ):
+                                center = normalized([vectors[group].mean(axis=0)])[0].tolist()
+                                decision.update(
+                                    action="create",
+                                    **description.model_dump(),
+                                    vector=center,
+                                    space_id=self.embedder.space_id,
+                                )
+                                staged_topics[f"candidate-{len(staged_topics)}"] = decision
+                    decisions.append(decision)
+                result = self.repo.apply_discovery(
+                    tenant, bot, token, decisions, s.max_topics_per_bot
+                )
+                return {"status": "completed", **result}
         finally:
             self.repo.release_discovery(tenant, bot, token)

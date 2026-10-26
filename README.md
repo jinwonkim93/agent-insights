@@ -81,7 +81,7 @@ The service depends on a `Repository` protocol. The included SQLAlchemy adapter 
 | PostgreSQL | `pip install -e '.[postgres]'` | `postgresql+psycopg://user:password@host/insights` |
 | MySQL | `pip install -e '.[mysql]'` | `mysql+pymysql://user:password@host/insights?charset=utf8mb4` |
 
-URL-encode reserved credential characters. Never commit real DB URLs. SQLite is for local/single-host evaluation; PostgreSQL is the first intended multi-worker target. A URL change does not migrate data. `init-db` bootstraps the alpha schema, not versioned migrations. Non-SQL backends need a new repository adapter implementing the same consistency contracts.
+URL-encode reserved credential characters. Never commit real DB URLs. SQLite is for local/single-host evaluation; PostgreSQL is the first intended multi-worker target. A URL change does not migrate data. `agent-insights migrate` upgrades the versioned Alembic schema; use `AI_AUTO_CREATE_SCHEMA=false` after migration in deployments. `init-db` remains a local bootstrap command. Non-SQL backends need a new repository adapter implementing the same consistency contracts.
 
 SQLite is tested locally. CI includes PostgreSQL/MySQL contract jobs; those engines must pass in your deployment environment before use. SQLAlchemy portability does not imply identical transaction or performance behavior.
 
@@ -141,7 +141,7 @@ Tests cover HTTP provider contracts, repository/service flow, scoped reads, dupl
 
 No personal memories, local filesystem paths, credentials, weights, research PDFs, DSTC12 originals or private generated summaries are included. All bundled examples are original synthetic data. Models, datasets and dependencies retain their own licenses.
 
-This alpha defaults to loopback. The optional shared service key is **not per-user or per-tenant authorization**; it grants access to all requested scopes. Before exposing to untrusted users, add TLS, a tenant-aware authenticated gateway, ingress size/rate limits, backups, retention/deletion, migrations and load testing. Leases have no heartbeat: keep model timeouts/batches within the lease. Details: [operations](docs/operations.md).
+This alpha defaults to loopback. The optional shared service key is **not per-user or per-tenant authorization**; it grants access to all requested scopes. Before exposing to untrusted users, add TLS, a tenant-aware authenticated gateway, ingress size/rate limits, backups, retention/deletion and load testing. Background heartbeats renew active leases; stale workers are fenced out of publication. Use the explicit migration command before deployment. Details: [operations](docs/operations.md).
 
 [Architecture](docs/architecture.md) · [한국어](docs/README.ko.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 

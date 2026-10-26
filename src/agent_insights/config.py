@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AI_", env_file=".env", extra="ignore")
+    auto_create_schema: bool = True
     database_url: str = "sqlite:///./agent-insights.db"
     generation_provider: str = "ollama"
     generation_url: str = "http://127.0.0.1:11434"
