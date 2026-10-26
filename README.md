@@ -2,7 +2,7 @@
 
 **Provider-independent topic analytics for continuously arriving, closed conversations.**
 
-![Agent Insights demo dashboard showing topic rankings, linked conversations, and transcript evidence](docs/assets/demo-dashboard.jpg)
+<a href="docs/assets/demo-dashboard.jpg"><img src="docs/assets/demo-dashboard.jpg" width="541" alt="Agent Insights demo dashboard showing topic rankings, linked conversations, and transcript evidence"></a>
 
 *Offline demo with original synthetic conversations. No customer data is shown.*
 
